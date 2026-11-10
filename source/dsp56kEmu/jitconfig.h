@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <optional>
 #include <functional>
+#include <atomic>
+#include <memory>
 
 #include "types.h"
 
@@ -83,6 +85,11 @@ namespace dsp56k
 		// bit identical to a build without an external bus device.
 		TWord externalBusBegin = 0;
 		TWord externalBusEnd = 0;		// exclusive
+
+		// 138l7: optional, per-device acknowledgement from the signature-checked
+		// Virus C handler. High bits: completion serial; low bits: 1=start,
+		// 2=latch marker, 3=release completed. Zero means observer not ready.
+		std::shared_ptr<std::atomic<uint64_t>> virusCAuditionOutcome;
 
 		// retrieves a JitConfig for a specific PC. If null, the global default config is used
 		std::function<std::optional<JitConfig>(TWord)> getBlockConfig;

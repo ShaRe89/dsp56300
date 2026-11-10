@@ -10,8 +10,94 @@
 
 #include "opcodes.h"
 
+#include "dsp56kBase/logging.h"
+
 namespace dsp56k
 {
+
+	// Functional 138l7 acknowledgement of the verified Virus C OS6.6 handler.
+	// These read-only observation points are required by the editor state machine.
+	namespace
+	{
+		bool auditionOutcomePoint(const TWord pc)
+		{
+			return pc == 0x028317 || pc == 0x02835b || pc == 0x028364
+				|| pc == 0x028377 || pc == 0x028379 || pc == 0x029208;
+		}
+
+		bool auditionOutcomeSignature(const DSP& dsp)
+		{
+			const auto& m = dsp.memory();
+			return m.get(MemArea_P, 0x028315) == 0x567000
+				&& m.get(MemArea_P, 0x028316) == 0x02ca28
+				&& m.get(MemArea_P, 0x028317) == 0x00000c
+				&& m.get(MemArea_P, 0x028357) == 0x000000
+				&& m.get(MemArea_P, 0x028358) == 0x69f000
+				&& m.get(MemArea_P, 0x028359) == 0x02c9df
+				&& m.get(MemArea_P, 0x02835b) == 0x200003
+				&& m.get(MemArea_P, 0x02835c) == 0x052409
+				&& m.get(MemArea_P, 0x028361) == 0x24ff00
+				&& m.get(MemArea_P, 0x028371) == 0x44f400
+				&& m.get(MemArea_P, 0x028372) == 0x000177
+				&& m.get(MemArea_P, 0x028375) == 0x273c00
+				&& m.get(MemArea_P, 0x028376) == 0x266400
+				&& m.get(MemArea_P, 0x028379) == 0x0af080
+				&& m.get(MemArea_P, 0x02837a) == 0x0291f3
+				&& m.get(MemArea_P, 0x029206) == 0x0208ef
+				&& m.get(MemArea_P, 0x029207) == 0x204800
+				&& m.get(MemArea_P, 0x029208) == 0x00000c;
+		}
+
+		void observeAuditionOutcome(DSP* dsp, const TWord pc)
+		{
+			const auto& outcome = dsp->getJit().getConfig().virusCAuditionOutcome;
+			if(outcome && outcome->load(std::memory_order_relaxed) == 0)
+				outcome->store(4, std::memory_order_release); // ready, no command completed yet
+			const auto publish = [&](const uint64_t result)
+			{
+				if(outcome)
+				{
+					const auto previous = outcome->load(std::memory_order_relaxed);
+					outcome->store(((previous & ~uint64_t{3}) + 4) | result, std::memory_order_release);
+				}
+			};
+			// Match the completion to the AUDITION release, excluding an interrupt's unrelated call.
+			struct Context
+			{
+				const DSP* owner = nullptr;
+				TWord sp = 0;
+				bool releasing = false;
+			};
+			static thread_local Context context;
+			const auto sp = dsp->regs().sp.toWord();
+			if(pc == 0x02835b)
+			{
+				context.owner = dsp;
+				context.releasing = false;
+			}
+			if(context.owner != dsp)
+				return;
+			if(pc == 0x029208)
+			{
+				// The two DO-loop stack entries have already been popped at this point.
+				if(!context.releasing || sp != context.sp)
+					return;
+				context.releasing = false;
+				publish(3);
+				return;
+			}
+			if(pc == 0x028364)
+				publish(2);
+			if(pc == 0x028377)
+				publish(1);
+			if(pc == 0x028379)
+			{
+				context.sp = sp;
+				context.releasing = true;
+			}
+		}
+	}
+
 	struct OpcodeInfo;
 	using TJitOpcodeFunc = void (JitOps::*)(TWord op);
 
@@ -280,6 +366,18 @@ namespace dsp56k
 		m_opWordA = _op;
 		m_opWordB = _opB;
 		m_opSize = 1;
+
+		// Only functional acknowledgement points for a registered C device are observed.
+		// Keep lazy CCR materialization and cached guest registers valid across the call.
+		if(auditionOutcomePoint(_pc)
+			&& m_block.getConfig().virusCAuditionOutcome
+			&& auditionOutcomeSignature(m_block.dsp()))
+		{
+			m_ccrRead |= CCR_All;
+			updateDirtyCCR();
+			m_block.dspRegPool().debugStoreAll();
+			callDSPFunc(&observeAuditionOutcome, _pc);
+		}
 
 		if(!_op)
 		{
